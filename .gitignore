@@ -1,0 +1,10 @@
+# Scraper output
+output/
+
+# LinkedIn cookies (contains auth tokens)
+linkedin_cookies.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
