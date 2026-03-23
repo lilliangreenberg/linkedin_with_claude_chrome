@@ -772,69 +772,104 @@ def _merge_urls_from_dom(experience_entries, company_links):
 #  Main scrape workflow
 # ---------------------------------------------------------------------------
 
-def scrape_profile(url):
-    """Main scraping workflow using Chrome + CDP."""
+def detect_profile_type(url, dom_data):
+    """Determine if a LinkedIn page is a company or an individual person.
+
+    Returns 'company' or 'person'.
+    """
+    # URL-based: /company/ is a company, /in/ is a person
+    if "/company/" in url or "/showcase/" in url:
+        return "company"
+    if "/in/" in url:
+        return "person"
+
+    # DOM-based: the content script sets type='company' when it finds
+    # company-specific elements (org-top-card)
+    if dom_data.get("type") == "company":
+        return "company"
+
+    # Fallback: if we see company-specific fields, it's a company
+    if dom_data.get("logo_url") or dom_data.get("tagline") or dom_data.get("company_info"):
+        return "company"
+
+    return "person"
+
+
+def _open_and_validate(url):
+    """Launch Chrome, navigate to the URL, extract DOM data.
+
+    Returns (proc, session, dom_data, slug) or raises/returns None on failure.
+    Caller is responsible for killing proc via kill_chrome().
+    """
     OUTPUT_DIR.mkdir(exist_ok=True)
     proc = launch_chrome(headless=False)
 
+    targets = cdp_get_targets()
+    page_targets = [t for t in targets if t.get("type") == "page"]
+
+    if page_targets:
+        ws_url = page_targets[0]["webSocketDebuggerUrl"]
+    else:
+        tab_info = cdp_new_tab()
+        ws_url = tab_info["webSocketDebuggerUrl"]
+
+    session = cdp_connect(ws_url)
+
+    session.send("Emulation.setDeviceMetricsOverride", {
+        "width": 1920,
+        "height": 1080,
+        "deviceScaleFactor": 1,
+        "mobile": False,
+    })
+
+    navigate_and_wait(session, url, wait_seconds=4)
+
+    # Check login wall
+    login_issue = check_login_wall(session)
+    if login_issue:
+        print(f"\nError: LinkedIn is requiring sign-in ({login_issue}).")
+        print("You are not logged in or your session has expired.")
+        print("Please run the login command first:\n")
+        print("    python3 linkedin_scraper.py --login\n")
+        session.close()
+        kill_chrome(proc)
+        return None
+
+    # Extract DOM data
+    print("Extracting profile data from page DOM...")
+    dom_data = extract_profile_via_extension(session)
+    print(f"DOM extraction found {len(dom_data)} fields")
+
+    # Validate
+    has_name = bool(dom_data.get("name"))
+    has_profile_url = bool(dom_data.get("profile_url", ""))
+    is_linkedin_profile = "linkedin.com" in dom_data.get("profile_url", "")
+    if not has_name and not (has_profile_url and is_linkedin_profile):
+        print("\nError: Could not extract profile data from the page.")
+        print("The page may not have loaded correctly, or the URL may be invalid.")
+        print(f"  URL requested: {url}")
+        print(f"  Page URL seen: {dom_data.get('profile_url', 'unknown')}")
+        print("\nNo data was saved.")
+        session.close()
+        kill_chrome(proc)
+        return None
+
+    slug = re.sub(r'[^a-zA-Z0-9]', '_', url.split("linkedin.com/")[-1].strip("/"))
+    if not slug:
+        slug = "profile"
+
+    return proc, session, dom_data, slug
+
+
+def scrape_person(url):
+    """Scrape a personal LinkedIn profile (/in/...)."""
+    result = _open_and_validate(url)
+    if result is None:
+        return None
+    proc, session, dom_data, slug = result
+
     try:
-        # Find or create a page target
-        targets = cdp_get_targets()
-        page_targets = [t for t in targets if t.get("type") == "page"]
-
-        if page_targets:
-            ws_url = page_targets[0]["webSocketDebuggerUrl"]
-        else:
-            tab_info = cdp_new_tab()
-            ws_url = tab_info["webSocketDebuggerUrl"]
-
-        session = cdp_connect(ws_url)
-
-        # Set a larger viewport so the screenshot captures more content
-        session.send("Emulation.setDeviceMetricsOverride", {
-            "width": 1920,
-            "height": 1080,
-            "deviceScaleFactor": 1,
-            "mobile": False,
-        })
-
-        # Navigate to the profile
-        navigate_and_wait(session, url, wait_seconds=4)
-
-        # Check if we hit a login wall
-        login_issue = check_login_wall(session)
-        if login_issue:
-            print(f"\nError: LinkedIn is requiring sign-in ({login_issue}).")
-            print("You are not logged in or your session has expired.")
-            print("Please run the login command first:\n")
-            print("    python3 linkedin_scraper.py --login\n")
-            session.close()
-            return None
-
-        # Extract profile data from the DOM via CDP Runtime.evaluate
-        print("Extracting profile data from page DOM...")
-        dom_data = extract_profile_via_extension(session)
-        print(f"DOM extraction found {len(dom_data)} fields")
-
-        # Validate we got meaningful data (not a blank or error page)
-        has_name = bool(dom_data.get("name"))
-        has_profile_url = bool(dom_data.get("profile_url", ""))
-        is_linkedin_profile = "linkedin.com" in dom_data.get("profile_url", "")
-        if not has_name and not (has_profile_url and is_linkedin_profile):
-            print("\nError: Could not extract profile data from the page.")
-            print("The page may not have loaded correctly, or the URL may be invalid.")
-            print(f"  URL requested: {url}")
-            print(f"  Page URL seen: {dom_data.get('profile_url', 'unknown')}")
-            print("\nNo data was saved.")
-            session.close()
-            return None
-
-
         # Capture screenshot
-        slug = re.sub(r'[^a-zA-Z0-9]', '_', url.split("linkedin.com/")[-1].strip("/"))
-        if not slug:
-            slug = "profile"
-
         screenshot_bytes = capture_screenshot(session)
         screenshot_path = OUTPUT_DIR / f"{slug}_screenshot.png"
         screenshot_path.write_bytes(screenshot_bytes)
@@ -872,17 +907,11 @@ def scrape_profile(url):
     if company_links and "experience" in profile_data and profile_data["experience"]:
         _merge_urls_from_dom(profile_data["experience"], company_links)
 
-    # Add metadata
+    profile_data["_type"] = "person"
     profile_data["_source_url"] = url
     profile_data["_scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     profile_data["_screenshot"] = str(screenshot_path)
     profile_data["_experience_screenshot"] = str(exp_screenshot_path)
-
-    # Download logo if available
-    logo_url = dom_data.get("logo_url") or dom_data.get("profile_image_url") or claude_data.get("logo_url")
-    logo_path = download_logo(logo_url, slug)
-    if logo_path:
-        profile_data["_logo_file"] = logo_path
 
     # Save JSON
     json_path = OUTPUT_DIR / f"{slug}.json"
@@ -890,12 +919,92 @@ def scrape_profile(url):
     print(f"\nProfile data saved to {json_path}")
 
     # Print summary
-    print("\n--- Extracted Info ---")
+    print("\n--- Extracted Person Info ---")
     for key, value in profile_data.items():
         if not key.startswith("_") and key != "raw_response":
             print(f"  {key}: {value}")
 
     return profile_data
+
+
+def scrape_company(url):
+    """Scrape a company LinkedIn page (/company/...).
+
+    TODO: Company-specific scraping logic to be implemented.
+    """
+    result = _open_and_validate(url)
+    if result is None:
+        return None
+    proc, session, dom_data, slug = result
+
+    try:
+        # Capture screenshot
+        screenshot_bytes = capture_screenshot(session)
+        screenshot_path = OUTPUT_DIR / f"{slug}_screenshot.png"
+        screenshot_path.write_bytes(screenshot_bytes)
+        print(f"Screenshot saved to {screenshot_path}")
+
+        session.close()
+
+    finally:
+        kill_chrome(proc)
+
+    # Analyze screenshot with Claude
+    claude_data = analyze_with_claude(screenshot_path)
+
+    # Merge: DOM data takes precedence, Claude fills in gaps
+    profile_data = {**claude_data, **{k: v for k, v in dom_data.items() if v}}
+
+    # Download company logo
+    logo_url = dom_data.get("logo_url") or claude_data.get("logo_url")
+    logo_path = download_logo(logo_url, slug)
+    if logo_path:
+        profile_data["_logo_file"] = logo_path
+
+    profile_data["_type"] = "company"
+    profile_data["_source_url"] = url
+    profile_data["_scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    profile_data["_screenshot"] = str(screenshot_path)
+
+    # Save JSON
+    json_path = OUTPUT_DIR / f"{slug}.json"
+    json_path.write_text(json.dumps(profile_data, indent=2, ensure_ascii=False))
+    print(f"\nProfile data saved to {json_path}")
+
+    # Print summary
+    print("\n--- Extracted Company Info ---")
+    for key, value in profile_data.items():
+        if not key.startswith("_") and key != "raw_response":
+            print(f"  {key}: {value}")
+
+    return profile_data
+
+
+def scrape_profile(url):
+    """Route to the correct scraper based on profile type."""
+    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    # Try URL-based detection first (fast, no Chrome needed)
+    if "/company/" in url or "/showcase/" in url:
+        profile_type = "company"
+    elif "/in/" in url:
+        profile_type = "person"
+    else:
+        # Ambiguous URL — need to load the page to check
+        result = _open_and_validate(url)
+        if result is None:
+            return None
+        proc, session, dom_data, slug = result
+        profile_type = detect_profile_type(url, dom_data)
+        session.close()
+        kill_chrome(proc)
+
+    print(f"Detected profile type: {profile_type}")
+
+    if profile_type == "company":
+        return scrape_company(url)
+    else:
+        return scrape_person(url)
 
 
 # ---------------------------------------------------------------------------
