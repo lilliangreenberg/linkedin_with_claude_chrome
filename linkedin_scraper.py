@@ -243,12 +243,28 @@ def extract_experience_links(session):
     js_code = """
     (function() {
         var results = [];
-        // Find the experience section
-        var section = document.getElementById('experience');
-        if (section) {
-            section = section.closest('section') || section.parentElement;
+        // On LinkedIn, #experience is a standalone anchor div.
+        // The actual section is the next sibling <section> element,
+        // or we can walk up from the anchor to find it.
+        var anchor = document.getElementById('experience');
+        var section = null;
+        if (anchor) {
+            // Try next sibling elements to find the section
+            var sibling = anchor.nextElementSibling;
+            while (sibling) {
+                if (sibling.tagName === 'SECTION') {
+                    section = sibling;
+                    break;
+                }
+                sibling = sibling.nextElementSibling;
+            }
+            // Fallback: parent may be the section
+            if (!section) {
+                section = anchor.closest('section') || anchor.parentElement;
+            }
         }
         if (!section) {
+            // Fallback: search by heading text
             var headings = document.querySelectorAll('section h2');
             for (var i = 0; i < headings.length; i++) {
                 if (headings[i].textContent.trim().toLowerCase().includes('experience')) {
@@ -274,6 +290,63 @@ def extract_experience_links(session):
                 // Clean up the name - remove extra whitespace
                 name = name.replace(/\\s+/g, ' ').trim();
                 results.push({company_linkedin_url: clean, company_name: name});
+            }
+        }
+        return JSON.stringify(results);
+    })()
+    """
+    result = session.send("Runtime.evaluate", {
+        "expression": js_code,
+        "returnByValue": True,
+    })
+    value = result.get("result", {}).get("value", "[]")
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def extract_activity_timestamps(session):
+    """Extract precise timestamps from recent activity via DOM <time> elements."""
+    js_code = """
+    (function() {
+        var results = [];
+        // LinkedIn activity items often contain <time> elements with datetime attributes
+        // Look in the recent activity / main feed section
+        var activitySection = document.querySelector('div.pvs-list__container') ||
+                              document.querySelector('section.pv-recent-activity-section');
+
+        // Broader search: find all time elements near activity indicators
+        var timeEls = document.querySelectorAll('time[datetime]');
+        for (var i = 0; i < timeEls.length; i++) {
+            var el = timeEls[i];
+            var datetime = el.getAttribute('datetime');
+            var displayText = el.textContent.trim();
+
+            // Try to find what type of activity this is
+            var container = el.closest('li') || el.closest('div[data-urn]') || el.parentElement;
+            var activityType = '';
+            if (container) {
+                var text = container.textContent.toLowerCase();
+                if (text.includes('reposted') || text.includes('repost')) {
+                    activityType = 'repost';
+                } else if (text.includes('liked') || text.includes('likes')) {
+                    activityType = 'like';
+                } else if (text.includes('commented')) {
+                    activityType = 'comment';
+                } else if (text.includes('posted') || text.includes('shared')) {
+                    activityType = 'post';
+                } else if (text.includes('celebrated') || text.includes('congrat')) {
+                    activityType = 'celebration';
+                }
+            }
+
+            if (datetime) {
+                results.push({
+                    type: activityType || 'unknown',
+                    datetime: datetime,
+                    display_text: displayText
+                });
             }
         }
         return JSON.stringify(results);
@@ -422,7 +495,7 @@ def analyze_with_claude(screenshot_path):
                             "- profile_url: the LinkedIn URL if visible\n"
                             "- recent_activity: list of recent activity entries, each with "
                             "only 'type' (e.g. 'repost', 'post', 'like', 'comment') and "
-                            "'when' (e.g. '1 week ago', '3 days ago')\n"
+                            "'when' (the exact text shown on screen, e.g. '1w', '3d', '2mo')\n"
                             "- any other useful fields you can identify\n\n"
                             "IGNORE: Do NOT include suggested/recommended profiles, "
                             "'People also viewed', 'People you may know' sections, "
@@ -490,7 +563,6 @@ def analyze_experience_with_claude(screenshot_path, company_links):
                             "- title: job title\n"
                             "- company: company name\n"
                             "- company_linkedin_url: the company's LinkedIn URL (use the provided links below to match)\n"
-                            "- employment_type: e.g. Full-time, Part-time, Contract (if shown)\n"
                             "- dates: the date range shown (e.g. 'Nov 2023 - Present')\n"
                             "- duration: the duration shown (e.g. '2 yrs 5 mos')\n"
                             "- description: the text description of the role. "
@@ -627,6 +699,10 @@ def scrape_profile(url):
         dom_data = extract_profile_via_extension(session)
         print(f"DOM extraction found {len(dom_data)} fields")
 
+        # Extract precise activity timestamps from DOM <time> elements
+        activity_timestamps = extract_activity_timestamps(session)
+        print(f"Found {len(activity_timestamps)} activity timestamps from DOM")
+
         # Capture screenshot
         slug = re.sub(r'[^a-zA-Z0-9]', '_', url.split("linkedin.com/")[-1].strip("/"))
         if not slug:
@@ -664,6 +740,10 @@ def scrape_profile(url):
     # Add experience data from the dedicated experience analysis
     if "experience" in experience_data:
         profile_data["experience"] = experience_data["experience"]
+
+    # Override recent_activity with precise DOM timestamps if available
+    if activity_timestamps:
+        profile_data["recent_activity"] = activity_timestamps
 
     # Add metadata
     profile_data["_source_url"] = url
