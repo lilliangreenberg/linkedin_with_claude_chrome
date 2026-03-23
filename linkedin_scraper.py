@@ -277,48 +277,47 @@ def scroll_to_experience(session):
     time.sleep(2)
 
 
-def extract_experience_links(session):
-    """Extract company LinkedIn URLs from the experience section via DOM."""
+def extract_experience_entries(session):
+    """Extract experience entries from the DOM, each with its company URL.
+
+    Walks each <li> in the experience section and extracts the company link
+    from within the same element, so URLs are naturally paired with entries.
+    Returns a list of dicts with: title, company, company_linkedin_url, dates.
+    """
     js_code = """
     (function() {
         var results = [];
-        var section = null;
         var debug = {};
 
-        // Strategy 1: Find the #experience anchor, then walk up to find
-        // the containing parent that holds all experience entries
+        // --- Locate the experience section container ---
+        var section = null;
+
         var anchor = document.getElementById('experience');
         debug.anchorFound = !!anchor;
         if (anchor) {
-            // The anchor is typically inside a div that's inside the section,
-            // or it could be a sibling. Try multiple traversal strategies.
-            // Walk up to find a section-like container
+            // Walk up to find the <section> or a container with list items
             var parent = anchor.parentElement;
-            for (var i = 0; i < 5 && parent; i++) {
-                // Check if this parent contains company links
-                var testLinks = parent.querySelectorAll('a[href*="/company/"]');
-                if (testLinks.length > 0) {
+            for (var i = 0; i < 6 && parent; i++) {
+                if (parent.tagName === 'SECTION' ||
+                    parent.querySelectorAll('li').length > 0) {
                     section = parent;
-                    debug.strategy = 'walk-up-' + i;
+                    debug.strategy = 'anchor-walk-' + i;
                     break;
                 }
                 parent = parent.parentElement;
             }
         }
 
-        // Strategy 2: Find section by heading text
         if (!section) {
             var headings = document.querySelectorAll('h2');
             for (var i = 0; i < headings.length; i++) {
-                var text = headings[i].textContent.trim().toLowerCase();
-                if (text === 'experience' || text.includes('experience')) {
-                    // Walk up from the heading to find a container with company links
+                if (headings[i].textContent.trim().toLowerCase().includes('experience')) {
                     var parent = headings[i].parentElement;
-                    for (var j = 0; j < 5 && parent; j++) {
-                        var testLinks = parent.querySelectorAll('a[href*="/company/"]');
-                        if (testLinks.length > 0) {
+                    for (var j = 0; j < 6 && parent; j++) {
+                        if (parent.tagName === 'SECTION' ||
+                            parent.querySelectorAll('li').length > 1) {
                             section = parent;
-                            debug.strategy = 'heading-walk-up-' + j;
+                            debug.strategy = 'heading-walk-' + j;
                             break;
                         }
                         parent = parent.parentElement;
@@ -328,27 +327,56 @@ def extract_experience_links(session):
             }
         }
 
-        // Strategy 3: Broadest fallback - just find all company links on the page
         if (!section) {
-            section = document;
-            debug.strategy = 'full-page-fallback';
+            debug.strategy = 'none-found';
+            results.push({_debug: debug});
+            return JSON.stringify(results);
         }
 
-        var links = section.querySelectorAll('a[href*="/company/"]');
-        debug.linksFound = links.length;
-        var seen = {};
-        for (var j = 0; j < links.length; j++) {
-            var href = links[j].href;
-            var clean = href.split('?')[0].replace(/\\/+$/, '');
-            if (!seen[clean]) {
-                seen[clean] = true;
-                var name = links[j].textContent.trim() ||
-                           links[j].getAttribute('aria-label') || '';
-                name = name.replace(/\\s+/g, ' ').trim();
-                results.push({company_linkedin_url: clean, company_name: name});
+        // --- Walk each list item and extract entry + its company URL ---
+        var items = section.querySelectorAll('li.artdeco-list__item');
+        if (items.length === 0) {
+            items = section.querySelectorAll('li[class*="artdeco-list"]');
+        }
+        if (items.length === 0) {
+            items = section.querySelectorAll('li');
+        }
+        debug.listItemCount = items.length;
+
+        for (var i = 0; i < items.length; i++) {
+            var li = items[i];
+            var entry = {};
+
+            // Title: usually the first bold span
+            var titleEl = li.querySelector('span.mr1.t-bold span') ||
+                          li.querySelector('span.t-bold span') ||
+                          li.querySelector('.t-bold span');
+            if (titleEl) entry.title = titleEl.innerText.trim();
+
+            // Company name: the secondary text line
+            var companyEl = li.querySelector('span.t-14.t-normal:not(.t-black--light) span') ||
+                            li.querySelector('span.t-14.t-normal span');
+            if (companyEl) entry.company = companyEl.innerText.trim();
+
+            // Dates
+            var datesEl = li.querySelector('span.t-14.t-normal.t-black--light span') ||
+                          li.querySelector('.t-black--light span');
+            if (datesEl) entry.dates = datesEl.innerText.trim();
+
+            // Company LinkedIn URL: find <a href="/company/..."> inside THIS <li>
+            var companyLink = li.querySelector('a[href*="/company/"]');
+            if (companyLink) {
+                var href = companyLink.href.split('?')[0].replace(/\\/+$/, '');
+                entry.company_linkedin_url = href;
+            }
+
+            // Only keep entries that have at least a title or company
+            if (entry.title || entry.company) {
+                results.push(entry);
             }
         }
-        debug.resultsCount = results.length;
+
+        debug.entriesExtracted = results.length;
         results.push({_debug: debug});
         return JSON.stringify(results);
     })()
@@ -360,7 +388,6 @@ def extract_experience_links(session):
     value = result.get("result", {}).get("value", "[]")
     try:
         items = json.loads(value)
-        # Extract and log debug info
         debug = None
         clean = []
         for item in items:
@@ -369,7 +396,7 @@ def extract_experience_links(session):
             else:
                 clean.append(item)
         if debug:
-            print(f"  Experience link extraction debug: {debug}")
+            print(f"  Experience DOM extraction debug: {debug}")
         return clean
     except (json.JSONDecodeError, TypeError):
         return []
@@ -675,6 +702,80 @@ def do_login():
 
 
 # ---------------------------------------------------------------------------
+#  Experience merge helper
+# ---------------------------------------------------------------------------
+
+def _merge_urls_from_dom(experience_entries, dom_entries):
+    """Inject company_linkedin_url from DOM entries into experience entries.
+
+    Uses three strategies in order:
+    1. Exact company name match (case-insensitive)
+    2. Substring match on company name
+    3. Positional fallback for remaining unmatched entries
+    """
+    if not dom_entries:
+        return
+
+    # Build lookup: lowercase company name -> URL
+    name_to_url = {}
+    for de in dom_entries:
+        url = de.get("company_linkedin_url", "")
+        name = de.get("company", "").strip().lower()
+        if url and name:
+            name_to_url[name] = url
+
+    # Also build a slug lookup: URL slug -> URL  (/company/google/ -> "google")
+    slug_to_url = {}
+    for de in dom_entries:
+        url = de.get("company_linkedin_url", "")
+        if url:
+            parts = url.rstrip("/").split("/")
+            if parts:
+                slug_to_url[parts[-1].lower()] = url
+
+    for entry in experience_entries:
+        if entry.get("company_linkedin_url"):
+            continue  # already has one
+
+        comp = entry.get("company", "").strip().lower()
+        if not comp:
+            continue
+
+        # Strategy 1: exact name match
+        if comp in name_to_url:
+            entry["company_linkedin_url"] = name_to_url[comp]
+            continue
+
+        # Strategy 2: substring match
+        matched = False
+        for dname, durl in name_to_url.items():
+            if dname in comp or comp in dname:
+                entry["company_linkedin_url"] = durl
+                matched = True
+                break
+        if matched:
+            continue
+
+        # Strategy 3: slug match (company name "Google" matches slug "google")
+        comp_words = comp.replace(",", "").replace(".", "").split()
+        for word in comp_words:
+            if word.lower() in slug_to_url:
+                entry["company_linkedin_url"] = slug_to_url[word.lower()]
+                break
+
+    # Strategy 4: positional fallback for any still missing
+    # If DOM and Claude have similar counts, map by position
+    unmatched_exp = [e for e in experience_entries if not e.get("company_linkedin_url")]
+    unmatched_dom = [d for d in dom_entries if d.get("company_linkedin_url")]
+    if unmatched_exp and unmatched_dom and len(experience_entries) == len(dom_entries):
+        for i, entry in enumerate(experience_entries):
+            if not entry.get("company_linkedin_url") and i < len(dom_entries):
+                dom_url = dom_entries[i].get("company_linkedin_url", "")
+                if dom_url:
+                    entry["company_linkedin_url"] = dom_url
+
+
+# ---------------------------------------------------------------------------
 #  Main scrape workflow
 # ---------------------------------------------------------------------------
 
@@ -746,10 +847,10 @@ def scrape_profile(url):
         screenshot_path.write_bytes(screenshot_bytes)
         print(f"Screenshot saved to {screenshot_path}")
 
-        # Scroll to experience section, extract company links, take screenshot
+        # Scroll to experience section, extract entries with URLs, take screenshot
         scroll_to_experience(session)
-        company_links = extract_experience_links(session)
-        print(f"Found {len(company_links)} company LinkedIn URLs in experience section")
+        dom_experience = extract_experience_entries(session)
+        print(f"Extracted {len(dom_experience)} experience entries from DOM")
 
         exp_screenshot_bytes = capture_screenshot(session)
         exp_screenshot_path = OUTPUT_DIR / f"{slug}_experience_screenshot.png"
@@ -764,41 +865,33 @@ def scrape_profile(url):
     # Analyze screenshot with Claude
     claude_data = analyze_with_claude(screenshot_path)
 
+    # Build company_links list from DOM entries (for the Claude hint and output)
+    company_links = [
+        {"company_linkedin_url": e["company_linkedin_url"], "company_name": e.get("company", "")}
+        for e in dom_experience if e.get("company_linkedin_url")
+    ]
+
     # Analyze experience screenshot with Claude
     experience_data = analyze_experience_with_claude(exp_screenshot_path, company_links)
 
     # Merge: DOM data takes precedence, Claude fills in gaps
     profile_data = {**claude_data, **{k: v for k, v in dom_data.items() if v}}
 
-    # Add experience data from the dedicated experience analysis
-    if "experience" in experience_data:
-        profile_data["experience"] = experience_data["experience"]
+    # Merge experience: start from Claude's entries (richer descriptions),
+    # then inject company_linkedin_url from DOM entries which are the
+    # authoritative source for URLs.
+    claude_experience = experience_data.get("experience", [])
+    if claude_experience:
+        profile_data["experience"] = claude_experience
+    elif dom_experience:
+        # Claude returned nothing — use DOM entries as-is
+        profile_data["experience"] = dom_experience
 
-    # Save the raw company links extracted from the DOM
+    if "experience" in profile_data and profile_data["experience"]:
+        _merge_urls_from_dom(profile_data["experience"], dom_experience)
+
     if company_links:
         profile_data["company_links"] = company_links
-
-        # Back-fill company_linkedin_url into experience entries if Claude missed them
-        if "experience" in profile_data and profile_data["experience"]:
-            # Build a lookup: lowercase company name -> URL
-            link_lookup = {}
-            for cl in company_links:
-                name = cl.get("company_name", "").strip().lower()
-                url_val = cl.get("company_linkedin_url", "")
-                if name and url_val:
-                    link_lookup[name] = url_val
-
-            for entry in profile_data["experience"]:
-                if not entry.get("company_linkedin_url"):
-                    comp = entry.get("company", "").strip().lower()
-                    if comp in link_lookup:
-                        entry["company_linkedin_url"] = link_lookup[comp]
-                    else:
-                        # Fuzzy: check if either is a substring of the other
-                        for lname, lurl in link_lookup.items():
-                            if lname in comp or comp in lname:
-                                entry["company_linkedin_url"] = lurl
-                                break
 
     # Add metadata
     profile_data["_source_url"] = url
