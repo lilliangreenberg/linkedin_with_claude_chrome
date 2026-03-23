@@ -202,6 +202,94 @@ def capture_screenshot(session):
     return base64.b64decode(result["data"])
 
 
+def scroll_to_experience(session):
+    """Scroll the page so the Experience section is visible."""
+    js_code = """
+    (function() {
+        var section = document.getElementById('experience');
+        if (!section) {
+            // Fallback: look for a section heading containing 'Experience'
+            var headings = document.querySelectorAll('section h2, div#experience');
+            for (var i = 0; i < headings.length; i++) {
+                if (headings[i].textContent.trim().toLowerCase().includes('experience')) {
+                    section = headings[i].closest('section') || headings[i];
+                    break;
+                }
+            }
+        }
+        if (section) {
+            section.scrollIntoView({block: 'start'});
+            return true;
+        }
+        // Last resort: scroll down a fixed amount
+        window.scrollBy(0, 800);
+        return false;
+    })()
+    """
+    result = session.send("Runtime.evaluate", {
+        "expression": js_code,
+        "returnByValue": True,
+    })
+    found = result.get("result", {}).get("value", False)
+    if found:
+        print("Scrolled to Experience section")
+    else:
+        print("Experience section not found, scrolled down as fallback")
+    time.sleep(2)
+
+
+def extract_experience_links(session):
+    """Extract company LinkedIn URLs from the experience section via DOM."""
+    js_code = """
+    (function() {
+        var results = [];
+        // Find the experience section
+        var section = document.getElementById('experience');
+        if (section) {
+            section = section.closest('section') || section.parentElement;
+        }
+        if (!section) {
+            var headings = document.querySelectorAll('section h2');
+            for (var i = 0; i < headings.length; i++) {
+                if (headings[i].textContent.trim().toLowerCase().includes('experience')) {
+                    section = headings[i].closest('section');
+                    break;
+                }
+            }
+        }
+        if (!section) return JSON.stringify(results);
+
+        // Find all links within the experience section that point to company pages
+        var links = section.querySelectorAll('a[href*="/company/"]');
+        var seen = {};
+        for (var j = 0; j < links.length; j++) {
+            var href = links[j].href;
+            // Normalize: strip query params and trailing slashes
+            var clean = href.split('?')[0].replace(/\\/+$/, '');
+            if (!seen[clean]) {
+                seen[clean] = true;
+                // Try to get the company name from nearby text
+                var name = links[j].textContent.trim() ||
+                           links[j].getAttribute('aria-label') || '';
+                // Clean up the name - remove extra whitespace
+                name = name.replace(/\\s+/g, ' ').trim();
+                results.push({company_linkedin_url: clean, company_name: name});
+            }
+        }
+        return JSON.stringify(results);
+    })()
+    """
+    result = session.send("Runtime.evaluate", {
+        "expression": js_code,
+        "returnByValue": True,
+    })
+    value = result.get("result", {}).get("value", "[]")
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
 def extract_profile_via_extension(session):
     """
     Execute the content script's extraction function directly via CDP's
@@ -362,6 +450,75 @@ def analyze_with_claude(screenshot_path):
         return {"raw_response": response_text}
 
 
+def analyze_experience_with_claude(screenshot_path, company_links):
+    """Use Claude's vision to extract experience details from the screenshot."""
+    client = anthropic.Anthropic()
+
+    image_data = base64.standard_b64encode(screenshot_path.read_bytes()).decode("utf-8")
+
+    # Build a hint about company URLs so Claude can match them
+    links_hint = ""
+    if company_links:
+        links_hint = (
+            "\n\nThe following company LinkedIn URLs were extracted from the page. "
+            "Match each to the correct experience entry by company name:\n"
+            + json.dumps(company_links, indent=2)
+        )
+
+    print("Analyzing experience screenshot with Claude...")
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=2048,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Analyze this LinkedIn Experience section screenshot. "
+                            "Extract each work experience entry and return as JSON with a single key "
+                            "'experience' containing a list. Each entry should have:\n"
+                            "- title: job title\n"
+                            "- company: company name\n"
+                            "- company_linkedin_url: the company's LinkedIn URL (use the provided links below to match)\n"
+                            "- employment_type: e.g. Full-time, Part-time, Contract (if shown)\n"
+                            "- dates: the date range shown (e.g. 'Nov 2023 - Present')\n"
+                            "- duration: the duration shown (e.g. '2 yrs 5 mos')\n"
+                            "- description: the text description of the role. "
+                            "Ignore any embedded images, videos, or links within the description text.\n\n"
+                            "IGNORE: sidebar suggestions, 'People also viewed', ads, "
+                            "and any non-experience content.\n"
+                            + links_hint
+                            + "\n\nReturn ONLY valid JSON, no markdown fences or extra text."
+                        ),
+                    },
+                ],
+            }
+        ],
+    )
+
+    response_text = message.content[0].text.strip()
+
+    if response_text.startswith("```"):
+        response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
+        response_text = re.sub(r'\s*```$', '', response_text)
+
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        print("Warning: Claude's experience response was not valid JSON. Saving raw text.")
+        return {"raw_experience_response": response_text}
+
+
 # ---------------------------------------------------------------------------
 #  Download logo
 # ---------------------------------------------------------------------------
@@ -480,6 +637,16 @@ def scrape_profile(url):
         screenshot_path.write_bytes(screenshot_bytes)
         print(f"Screenshot saved to {screenshot_path}")
 
+        # Scroll to experience section, extract company links, take screenshot
+        scroll_to_experience(session)
+        company_links = extract_experience_links(session)
+        print(f"Found {len(company_links)} company LinkedIn URLs in experience section")
+
+        exp_screenshot_bytes = capture_screenshot(session)
+        exp_screenshot_path = OUTPUT_DIR / f"{slug}_experience_screenshot.png"
+        exp_screenshot_path.write_bytes(exp_screenshot_bytes)
+        print(f"Experience screenshot saved to {exp_screenshot_path}")
+
         session.close()
 
     finally:
@@ -488,13 +655,21 @@ def scrape_profile(url):
     # Analyze screenshot with Claude
     claude_data = analyze_with_claude(screenshot_path)
 
+    # Analyze experience screenshot with Claude
+    experience_data = analyze_experience_with_claude(exp_screenshot_path, company_links)
+
     # Merge: DOM data takes precedence, Claude fills in gaps
     profile_data = {**claude_data, **{k: v for k, v in dom_data.items() if v}}
+
+    # Add experience data from the dedicated experience analysis
+    if "experience" in experience_data:
+        profile_data["experience"] = experience_data["experience"]
 
     # Add metadata
     profile_data["_source_url"] = url
     profile_data["_scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     profile_data["_screenshot"] = str(screenshot_path)
+    profile_data["_experience_screenshot"] = str(exp_screenshot_path)
 
     # Download logo if available
     logo_url = dom_data.get("logo_url") or dom_data.get("profile_image_url") or claude_data.get("logo_url")
