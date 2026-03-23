@@ -243,55 +243,74 @@ def extract_experience_links(session):
     js_code = """
     (function() {
         var results = [];
-        // On LinkedIn, #experience is a standalone anchor div.
-        // The actual section is the next sibling <section> element,
-        // or we can walk up from the anchor to find it.
-        var anchor = document.getElementById('experience');
         var section = null;
-        if (anchor) {
-            // Try next sibling elements to find the section
-            var sibling = anchor.nextElementSibling;
-            while (sibling) {
-                if (sibling.tagName === 'SECTION') {
-                    section = sibling;
-                    break;
-                }
-                sibling = sibling.nextElementSibling;
-            }
-            // Fallback: parent may be the section
-            if (!section) {
-                section = anchor.closest('section') || anchor.parentElement;
-            }
-        }
-        if (!section) {
-            // Fallback: search by heading text
-            var headings = document.querySelectorAll('section h2');
-            for (var i = 0; i < headings.length; i++) {
-                if (headings[i].textContent.trim().toLowerCase().includes('experience')) {
-                    section = headings[i].closest('section');
-                    break;
-                }
-            }
-        }
-        if (!section) return JSON.stringify(results);
+        var debug = {};
 
-        // Find all links within the experience section that point to company pages
+        // Strategy 1: Find the #experience anchor, then walk up to find
+        // the containing parent that holds all experience entries
+        var anchor = document.getElementById('experience');
+        debug.anchorFound = !!anchor;
+        if (anchor) {
+            // The anchor is typically inside a div that's inside the section,
+            // or it could be a sibling. Try multiple traversal strategies.
+            // Walk up to find a section-like container
+            var parent = anchor.parentElement;
+            for (var i = 0; i < 5 && parent; i++) {
+                // Check if this parent contains company links
+                var testLinks = parent.querySelectorAll('a[href*="/company/"]');
+                if (testLinks.length > 0) {
+                    section = parent;
+                    debug.strategy = 'walk-up-' + i;
+                    break;
+                }
+                parent = parent.parentElement;
+            }
+        }
+
+        // Strategy 2: Find section by heading text
+        if (!section) {
+            var headings = document.querySelectorAll('h2');
+            for (var i = 0; i < headings.length; i++) {
+                var text = headings[i].textContent.trim().toLowerCase();
+                if (text === 'experience' || text.includes('experience')) {
+                    // Walk up from the heading to find a container with company links
+                    var parent = headings[i].parentElement;
+                    for (var j = 0; j < 5 && parent; j++) {
+                        var testLinks = parent.querySelectorAll('a[href*="/company/"]');
+                        if (testLinks.length > 0) {
+                            section = parent;
+                            debug.strategy = 'heading-walk-up-' + j;
+                            break;
+                        }
+                        parent = parent.parentElement;
+                    }
+                    if (section) break;
+                }
+            }
+        }
+
+        // Strategy 3: Broadest fallback - just find all company links on the page
+        if (!section) {
+            section = document;
+            debug.strategy = 'full-page-fallback';
+        }
+
         var links = section.querySelectorAll('a[href*="/company/"]');
+        debug.linksFound = links.length;
         var seen = {};
         for (var j = 0; j < links.length; j++) {
             var href = links[j].href;
-            // Normalize: strip query params and trailing slashes
             var clean = href.split('?')[0].replace(/\\/+$/, '');
             if (!seen[clean]) {
                 seen[clean] = true;
-                // Try to get the company name from nearby text
                 var name = links[j].textContent.trim() ||
                            links[j].getAttribute('aria-label') || '';
-                // Clean up the name - remove extra whitespace
                 name = name.replace(/\\s+/g, ' ').trim();
                 results.push({company_linkedin_url: clean, company_name: name});
             }
         }
+        debug.resultsCount = results.length;
+        results.push({_debug: debug});
         return JSON.stringify(results);
     })()
     """
@@ -301,7 +320,18 @@ def extract_experience_links(session):
     })
     value = result.get("result", {}).get("value", "[]")
     try:
-        return json.loads(value)
+        items = json.loads(value)
+        # Extract and log debug info
+        debug = None
+        clean = []
+        for item in items:
+            if isinstance(item, dict) and "_debug" in item:
+                debug = item["_debug"]
+            else:
+                clean.append(item)
+        if debug:
+            print(f"  Experience link extraction debug: {debug}")
+        return clean
     except (json.JSONDecodeError, TypeError):
         return []
 
@@ -692,7 +722,7 @@ def scrape_profile(url):
         })
 
         # Navigate to the profile
-        navigate_and_wait(session, url, wait_seconds=5)
+        navigate_and_wait(session, url, wait_seconds=2)
 
         # Extract profile data from the DOM via CDP Runtime.evaluate
         print("Extracting profile data from page DOM...")
