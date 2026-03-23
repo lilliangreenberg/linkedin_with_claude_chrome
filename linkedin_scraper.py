@@ -712,6 +712,31 @@ def scrape_profile(url):
     if "experience" in experience_data:
         profile_data["experience"] = experience_data["experience"]
 
+    # Save the raw company links extracted from the DOM
+    if company_links:
+        profile_data["company_links"] = company_links
+
+        # Back-fill company_linkedin_url into experience entries if Claude missed them
+        if "experience" in profile_data and profile_data["experience"]:
+            # Build a lookup: lowercase company name -> URL
+            link_lookup = {}
+            for cl in company_links:
+                name = cl.get("company_name", "").strip().lower()
+                url_val = cl.get("company_linkedin_url", "")
+                if name and url_val:
+                    link_lookup[name] = url_val
+
+            for entry in profile_data["experience"]:
+                if not entry.get("company_linkedin_url"):
+                    comp = entry.get("company", "").strip().lower()
+                    if comp in link_lookup:
+                        entry["company_linkedin_url"] = link_lookup[comp]
+                    else:
+                        # Fuzzy: check if either is a substring of the other
+                        for lname, lurl in link_lookup.items():
+                            if lname in comp or comp in lname:
+                                entry["company_linkedin_url"] = lurl
+                                break
 
     # Add metadata
     profile_data["_source_url"] = url
