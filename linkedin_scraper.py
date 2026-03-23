@@ -365,6 +365,17 @@ def extract_experience_entries(session):
 
             // Company LinkedIn URL: find <a href="/company/..."> inside THIS <li>
             var companyLink = li.querySelector('a[href*="/company/"]');
+            // If not found inside, check immediate parent containers
+            // (LinkedIn sometimes nests links above the <li>)
+            if (!companyLink) {
+                var p = li.parentElement;
+                for (var k = 0; k < 2 && p && !companyLink; k++) {
+                    // Only grab direct company links, not from sibling entries
+                    var candidates = p.querySelectorAll(':scope > a[href*="/company/"]');
+                    if (candidates.length > 0) companyLink = candidates[0];
+                    p = p.parentElement;
+                }
+            }
             if (companyLink) {
                 var href = companyLink.href.split('?')[0].replace(/\\/+$/, '');
                 entry.company_linkedin_url = href;
@@ -377,6 +388,28 @@ def extract_experience_entries(session):
         }
 
         debug.entriesExtracted = results.length;
+
+        // Fallback: if we got entries but none have URLs, collect all
+        // company links from the section and assign by position
+        var hasAnyUrl = results.some(function(r) { return !!r.company_linkedin_url; });
+        if (!hasAnyUrl && results.length > 0) {
+            var allLinks = section.querySelectorAll('a[href*="/company/"]');
+            var uniqueUrls = [];
+            var seenUrls = {};
+            for (var j = 0; j < allLinks.length; j++) {
+                var lhref = allLinks[j].href.split('?')[0].replace(/\\/+$/, '');
+                if (!seenUrls[lhref]) {
+                    seenUrls[lhref] = true;
+                    uniqueUrls.push(lhref);
+                }
+            }
+            debug.fallbackUrlCount = uniqueUrls.length;
+            // Assign by position if counts are close
+            for (var j = 0; j < results.length && j < uniqueUrls.length; j++) {
+                results[j].company_linkedin_url = uniqueUrls[j];
+            }
+        }
+
         results.push({_debug: debug});
         return JSON.stringify(results);
     })()
@@ -602,7 +635,8 @@ def analyze_experience_with_claude(screenshot_path, company_links):
                             "'experience' containing a list. Each entry should have:\n"
                             "- title: job title\n"
                             "- company: company name\n"
-                            "- company_linkedin_url: the company's LinkedIn URL (use the provided links below to match)\n"
+                            "- company_linkedin_url: the company's LinkedIn URL (use the provided links below to match). "
+                            "OMIT this field entirely if no URL is available — do NOT set it to null or \"null\".\n"
                             "- dates: the date range shown (e.g. 'Nov 2023 - Present')\n"
                             "- duration: the duration shown (e.g. '2 yrs 5 mos')\n"
                             "- description: the text description of the role. "
@@ -705,37 +739,53 @@ def do_login():
 #  Experience merge helper
 # ---------------------------------------------------------------------------
 
+def _is_valid_url(value):
+    """Check if a company_linkedin_url value is a real URL, not null/N/A/empty."""
+    if not value or not isinstance(value, str):
+        return False
+    v = value.strip().lower()
+    if v in ("null", "none", "n/a", "unknown", ""):
+        return False
+    return v.startswith("http")
+
+
 def _merge_urls_from_dom(experience_entries, dom_entries):
     """Inject company_linkedin_url from DOM entries into experience entries.
 
-    Uses three strategies in order:
+    Uses four strategies in order:
     1. Exact company name match (case-insensitive)
     2. Substring match on company name
-    3. Positional fallback for remaining unmatched entries
+    3. URL slug match against company name words
+    4. Positional fallback for remaining unmatched entries
     """
     if not dom_entries:
         return
+
+    # First pass: clean out garbage values Claude may have set
+    for entry in experience_entries:
+        if not _is_valid_url(entry.get("company_linkedin_url")):
+            entry.pop("company_linkedin_url", None)
 
     # Build lookup: lowercase company name -> URL
     name_to_url = {}
     for de in dom_entries:
         url = de.get("company_linkedin_url", "")
         name = de.get("company", "").strip().lower()
-        if url and name:
+        if _is_valid_url(url) and name:
             name_to_url[name] = url
 
     # Also build a slug lookup: URL slug -> URL  (/company/google/ -> "google")
     slug_to_url = {}
     for de in dom_entries:
         url = de.get("company_linkedin_url", "")
-        if url:
+        if _is_valid_url(url):
             parts = url.rstrip("/").split("/")
             if parts:
                 slug_to_url[parts[-1].lower()] = url
 
     for entry in experience_entries:
-        if entry.get("company_linkedin_url"):
-            continue  # already has one
+        if _is_valid_url(entry.get("company_linkedin_url")):
+            continue  # already has a real one
 
         comp = entry.get("company", "").strip().lower()
         if not comp:
@@ -765,13 +815,13 @@ def _merge_urls_from_dom(experience_entries, dom_entries):
 
     # Strategy 4: positional fallback for any still missing
     # If DOM and Claude have similar counts, map by position
-    unmatched_exp = [e for e in experience_entries if not e.get("company_linkedin_url")]
-    unmatched_dom = [d for d in dom_entries if d.get("company_linkedin_url")]
+    unmatched_exp = [e for e in experience_entries if not _is_valid_url(e.get("company_linkedin_url"))]
+    unmatched_dom = [d for d in dom_entries if _is_valid_url(d.get("company_linkedin_url"))]
     if unmatched_exp and unmatched_dom and len(experience_entries) == len(dom_entries):
         for i, entry in enumerate(experience_entries):
-            if not entry.get("company_linkedin_url") and i < len(dom_entries):
+            if not _is_valid_url(entry.get("company_linkedin_url")) and i < len(dom_entries):
                 dom_url = dom_entries[i].get("company_linkedin_url", "")
-                if dom_url:
+                if _is_valid_url(dom_url):
                     entry["company_linkedin_url"] = dom_url
 
 
