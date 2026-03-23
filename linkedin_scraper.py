@@ -88,6 +88,7 @@ def launch_chrome(headless=True):
         "--disable-popup-blocking",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        "--remote-allow-origins=*",
     ]
 
     if headless:
