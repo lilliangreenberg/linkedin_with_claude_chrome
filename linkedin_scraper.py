@@ -596,7 +596,7 @@ def do_login():
 def scrape_profile(url):
     """Main scraping workflow using Chrome + CDP."""
     OUTPUT_DIR.mkdir(exist_ok=True)
-    proc = launch_chrome(headless=True)
+    proc = launch_chrome(headless=False)
 
     try:
         # Find or create a page target
