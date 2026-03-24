@@ -4,8 +4,18 @@
 
 set -e
 
+# Create and activate a virtual environment if not already in one
+if [ -z "$VIRTUAL_ENV" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv venv
+    source venv/bin/activate
+    echo "  Virtual environment created at ./venv"
+else
+    echo "Using existing virtual environment: $VIRTUAL_ENV"
+fi
+
 echo "Installing Python dependencies..."
-pip3 install -r requirements.txt
+pip install -r requirements.txt
 
 echo ""
 echo "Checking for Chrome / Chromium..."
@@ -24,6 +34,7 @@ echo ""
 echo "Setup complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Set your ANTHROPIC_API_KEY environment variable"
-echo "  2. Log in to LinkedIn:  python3 linkedin_scraper.py --login"
-echo "  3. Scrape a profile:    python3 linkedin_scraper.py https://www.linkedin.com/in/someone/"
+echo "  1. Activate the virtual environment:  source venv/bin/activate"
+echo "  2. Set your ANTHROPIC_API_KEY environment variable"
+echo "  3. Log in to LinkedIn:  python3 linkedin_scraper.py --login"
+echo "  4. Scrape a profile:    python3 linkedin_scraper.py https://www.linkedin.com/in/someone/"

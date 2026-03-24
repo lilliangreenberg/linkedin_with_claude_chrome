@@ -84,10 +84,16 @@ function extractProfileData() {
                           entry.querySelector(".t-14.t-normal");
         const datesEl = entry.querySelector("span.t-14.t-normal.t-black--light span") ||
                         entry.querySelector(".t-black--light span");
+        // Company LinkedIn URL from within this entry's <li>
+        const companyLink = entry.querySelector('a[href*="/company/"]');
+
         const exp = {};
         if (titleEl) exp.title = titleEl.innerText.trim();
         if (companyEl) exp.company = companyEl.innerText.trim();
         if (datesEl) exp.dates = datesEl.innerText.trim();
+        if (companyLink) {
+          exp.company_linkedin_url = companyLink.href.split("?")[0].replace(/\/+$/, "");
+        }
         if (Object.keys(exp).length > 0) {
           experience.push(exp);
         }
