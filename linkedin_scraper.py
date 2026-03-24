@@ -506,7 +506,7 @@ def analyze_with_claude(screenshot_path):
                             "'Where they studied', suggested/recommended profiles, "
                             "'People also viewed', 'People you may know' sections, "
                             "messaging availability status, posts_count, chosen/featured "
-                            "quotes, or counts of comments/videos/images available.\n\n"
+                            "quotes, testimonials, or counts of comments/videos/images available.\n\n"
                             "Return ONLY valid JSON, no markdown fences or extra text."
                         ),
                     },
@@ -1257,7 +1257,8 @@ def scrape_company(url):
     # Strip company sections we don't care about
     for unwanted in ("where_they_live", "where_they_studied",
                      "employee_locations", "employee_education",
-                     "quote", "chosen_quote", "featured_quote"):
+                     "quote", "chosen_quote", "featured_quote",
+                     "testimonial", "testimonials"):
         profile_data.pop(unwanted, None)
 
     profile_data["_type"] = "company"
