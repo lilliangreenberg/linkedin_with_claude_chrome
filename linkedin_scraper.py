@@ -502,10 +502,11 @@ def analyze_with_claude(screenshot_path):
                             "'3d', '2mo', '5h', '1yr'). Copy the label exactly as displayed. "
                             "Do NOT paraphrase, summarize, or write 'recently' — use the literal text.\n"
                             "- any other useful fields you can identify\n\n"
-                            "IGNORE: Do NOT include suggested/recommended profiles, "
+                            "IGNORE: Do NOT include 'Where they live', "
+                            "'Where they studied', suggested/recommended profiles, "
                             "'People also viewed', 'People you may know' sections, "
-                            "messaging availability status, posts_count, or counts of "
-                            "comments/videos/images available.\n\n"
+                            "messaging availability status, posts_count, chosen/featured "
+                            "quotes, or counts of comments/videos/images available.\n\n"
                             "Return ONLY valid JSON, no markdown fences or extra text."
                         ),
                     },
@@ -1252,6 +1253,12 @@ def scrape_company(url):
         note = ceo_result.get("note", "No CEO/Founder found in visible employees")
         profile_data["_ceo_search_note"] = note
         print(f"\n{note}")
+
+    # Strip company sections we don't care about
+    for unwanted in ("where_they_live", "where_they_studied",
+                     "employee_locations", "employee_education",
+                     "quote", "chosen_quote", "featured_quote"):
+        profile_data.pop(unwanted, None)
 
     profile_data["_type"] = "company"
     profile_data["_source_url"] = url
